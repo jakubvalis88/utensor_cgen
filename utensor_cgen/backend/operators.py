@@ -444,7 +444,7 @@ class _InlineOperator(_Operator):
     return preapred
 
 @OperatorFactory.register
-@OpEqualityDelegate.is_compatible_with("Inline")
+# @OpEqualityDelegate.is_compatible_with("Inline")
 class _ConstOperator(_Operator):
 
   op_type = "Const"

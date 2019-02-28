@@ -5,15 +5,10 @@ import attr
 from attr.validators import instance_of
 
 from utensor_cgen.ir import uTensorGraph
-from utensor_cgen.ir.utils import is_list_of
+from utensor_cgen.matcher._morphism import Morphism
 from utensor_cgen.utils import get_op_names_bfs
 
 __all__ = ["uTensorGraphMatcher"]
-
-@attr.s
-class Association(object):
-  permutations = attr.ib(validator=is_list_of(tuple))
-
 
 @attr.s(frozen=True, slots=True)
 class OpEqualityDelegate(object):
@@ -21,7 +16,9 @@ class OpEqualityDelegate(object):
   # to activate all configurations
   import utensor_cgen.backend.operators
 
+  # op_type -> list[tuple] (permutations)
   _association_map = {}
+  # op_type -> dict[op_type] -> morphism
   _compatibility_map = {}
 
   @attr.s
@@ -40,19 +37,32 @@ class OpEqualityDelegate(object):
         raise ValueError(
           "duplicate associativity definition found for {}".format(op.op_type)
         )
-      cls._association_map[op.op_type] = Association(permutations)
+      cls._association_map[op.op_type] = permutations
       return op
     return deco
 
   @classmethod
-  def is_compatible_with(cls, other_op_type):
+  def is_compatible_with(cls, other_op_type, morphism):
+    if not isinstance(morphism, Morphism):
+      raise ValueError(
+        'expecting Morphism object for `morphism`, get {}'.format(type(morphism))
+      )
     def deco(op):
       if op.op_type not in cls._compatibility_map:
-        cls._compatibility_map[op.op_type] = set()
+        cls._compatibility_map[op.op_type] = {}
       if other_op_type not in cls._compatibility_map:
-        cls._compatibility_map[other_op_type] = set()
-      cls._compatibility_map[op.op_type].add(other_op_type)
-      cls._compatibility_map[other_op_type].add(op.op_type)
+        cls._compatibility_map[other_op_type] = {}
+      if (op.op_type in cls._compatibility_map[other_op_type] or
+          other_op_type in cls._compatibility_map[op.op_type]):
+        raise RuntimeError(
+          "Op compatibility should be defined once only: {} and {}".format(op.op_type, other_op_type)
+        )
+      if (morphism.from_op_type != op.op_type) or (morphism.to_op_type != other_op_type):
+        raise ValueError(
+          "morphisim mismatch: {} be applied to {} and {}".format(type(morphism), op.op_type, other_op_type)
+        )
+      cls._compatibility_map[op.op_type][other_op_type] = morphism.transform
+      cls._compatibility_map[other_op_type][op.op_type] = morphism.inv_transform
       return op
     return deco
 
@@ -71,7 +81,7 @@ class OpEqualityDelegate(object):
         input_permutation=tuple(i for i in range(this_op.n_inputs))
       )
     # 1. compatibility
-    is_compatible = cls._query_compatible(this_op, other_op)
+    is_compatible, transform = cls._query_compatible(this_op, other_op)
 
     # 2: same op_type with agree inputs
     is_equal, input_permutation = cls._query_equal_w_association(this_op, other_op)
@@ -83,11 +93,10 @@ class OpEqualityDelegate(object):
   
   @classmethod
   def _query_compatible(cls, this_op, other_op):
-    compatible_ops = cls._compatibility_map.get(this_op.op_type, set())
-    return (
-      this_op.op_type == other_op.op_type or
-      other_op.op_type in compatible_ops
-    )
+    morphism_map = cls._compatibility_map.get(this_op.op_type, {})
+    is_compatible = this_op.op_type == other_op.op_type or this_op.op_type in morphism_map
+    transform = morphism_map.get(this_op.op_type)
+    return is_compatible, transform
 
   @classmethod
   def _query_equal_w_association(cls, this_op, other_op):
@@ -95,7 +104,7 @@ class OpEqualityDelegate(object):
       return False, None
     association = cls._association_map.get(
       this_op.op_type,
-      Association(permutations=[tuple(i for i in range(this_op.n_inputs))])
+      [tuple(i for i in range(this_op.n_inputs))]
     )
     match = False
     match_perm = None
@@ -169,7 +178,7 @@ class _MatchState(object):
       raise ValueError(
         'expecting a uTensorGraphMatch, get {}'.format(type(value))
       )
-  # bfs_queue is a queue for BFS of the subject ugraph
+  # sub_bfs_queue is a queue for BFS of the subject ugraph
   sub_bfs_queue = attr.ib(validator=instance_of(deque))
   # consume_queue is a queue defines the matching order of pattern ugraph
   patrn_bfs_queue = attr.ib(init=False, factory=deque)
